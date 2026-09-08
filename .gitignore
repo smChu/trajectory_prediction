@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# VIRAT Video Dataset
+/data/videos/
+/data/annotations/
+/data/homography/
+
+# Model weights
+/weights/
+
+# output
+/runs/
