@@ -227,3 +227,11 @@ __marimo__/
 
 # output
 /runs/
+
+# Local datasets and workspace files
+/Resources/videos_original/
+/Resources/annotations/
+/.vscode/
+/.agents/
+/.codex/
+/.aws/
