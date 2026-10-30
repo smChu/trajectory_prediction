@@ -26,7 +26,7 @@ from deep_sort.tracker import Tracker
 from tools.generate_detections import create_box_encoder, extract_image_patch
 from homography import ground_observations, load_virat_homography
 from ekf import DEFAULT_Q, INITIALIZATION_OBSERVATIONS, TrackEKFs
-from estimate_r import default_calibration_path, load_r_calibration
+from estimate_r import TRACKER_MAX_AGE, YOLO_NMS_IOU, default_calibration_path, load_r_calibration
 from forecast import collect_forecasts, draw_forecasts
 
 
@@ -106,6 +106,7 @@ def run(args):
         index += 1
     print(f"Output: {args.output}")
     print(f"YOLO imgsz: {args.imgsz}")
+    print(f"YOLO NMS IoU: {YOLO_NMS_IOU}")
 
     homography, calibration_size, homography_path = load_virat_homography(args.source)
     scene = homography_path.stem.split("_")[1]
@@ -148,7 +149,8 @@ def run(args):
     encoder, patch_shape = create_mars_encoder(args.mars_model)
     model = YOLO(str(args.model))
     metric = NearestNeighborDistanceMetric("cosine", 0.2, budget=None)
-    tracker = Tracker(metric, max_iou_distance=0.7, max_age=30, n_init=3)
+    tracker = Tracker(metric, max_iou_distance=0.7, max_age=TRACKER_MAX_AGE, n_init=3)
+    print(f"DeepSORT max_age: {TRACKER_MAX_AGE} frames")
     capture = cv2.VideoCapture(str(args.source))
     writer = None
     frames = 0
@@ -172,7 +174,7 @@ def run(args):
 
             result = model.predict(
                 source=frame, classes=[0], device=args.device,
-                imgsz=args.imgsz, save=False, verbose=False,
+                imgsz=args.imgsz, iou=YOLO_NMS_IOU, save=False, verbose=False,
             )[0]
             detections = make_detections(frame, result, encoder, patch_shape)
             # Empty detections must still advance the original track lifecycle.

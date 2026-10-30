@@ -18,6 +18,9 @@ from homography import ground_observations, load_virat_homography, pixel_to_grou
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# Shared by tracking and offline calibration so the selected R matches both.
+TRACKER_MAX_AGE = 60
+YOLO_NMS_IOU = 0.65
 
 
 def sha256(path):
@@ -38,7 +41,8 @@ def configuration(source, model, mars_model, imgsz):
         "homography_sha256": sha256(matrix_path), "image_size": list(size),
         "model_sha256": sha256(model), "mars_sha256": sha256(mars_model),
         "imgsz": int(imgsz), "person_class": 0, "confidence": 0.25,
-        "tracker": {"n_init": 3, "max_age": 30, "max_iou_distance": 0.7,
+        "nms_iou": YOLO_NMS_IOU,
+        "tracker": {"n_init": 3, "max_age": TRACKER_MAX_AGE, "max_iou_distance": 0.7,
                     "max_cosine_distance": 0.2},
     }
 
@@ -46,7 +50,12 @@ def configuration(source, model, mars_model, imgsz):
 def default_calibration_path(source, model, imgsz):
     _, _, matrix_path = load_virat_homography(source)
     scene = matrix_path.stem.split("_")[1]
-    return ROOT / "runs/calibration" / f"ekf_r_{scene}_{Path(model).stem}_imgsz{imgsz}.json"
+    # Keep the original max_age=30 calibration files available for comparison
+    # and rollback; other retention settings get a distinct filename.
+    suffix = "" if TRACKER_MAX_AGE == 30 else f"_maxage{TRACKER_MAX_AGE}"
+    if YOLO_NMS_IOU != 0.7:
+        suffix += f"_nms{YOLO_NMS_IOU:g}".replace(".", "p")
+    return ROOT / "runs/calibration" / f"ekf_r_{scene}_{Path(model).stem}_imgsz{imgsz}{suffix}.json"
 
 
 def load_r_calibration(path, source, model, mars_model, imgsz):
@@ -56,8 +65,13 @@ def load_r_calibration(path, source, model, mars_model, imgsz):
             "clip first, or explicitly supply provisional --ekf-r VAR_X VAR_Y."
         )
     data = json.loads(path.read_text())
-    if data.get("schema") != 1 or data.get("configuration") != configuration(source, model, mars_model, imgsz):
-        raise ValueError("R calibration does not match the homography, model, image size or tracker settings; recalibrate")
+    saved_config = data.get("configuration")
+    # Earlier files used the verified Ultralytics default iou=0.7, without
+    # recording it explicitly. Preserve compatibility when reverting to 0.7.
+    if isinstance(saved_config, dict):
+        saved_config = {"nms_iou": 0.7, **saved_config}
+    if data.get("schema") != 1 or saved_config != configuration(source, model, mars_model, imgsz):
+        raise ValueError("R calibration does not match the homography, model, image size, NMS IoU or tracker settings; recalibrate")
     r = np.asarray(data["r_diagonal"], dtype=float)
     if r.shape != (2,) or not np.isfinite(r).all() or np.any(r <= 0):
         raise ValueError("Calibration must contain two positive finite R variances")
@@ -140,7 +154,7 @@ def calibrate(args):
     encoder, patch_shape = tracking.create_mars_encoder(args.mars_model)
     model = tracking.YOLO(str(args.model))
     tracker = tracking.Tracker(tracking.NearestNeighborDistanceMetric("cosine", 0.2, budget=None),
-                               max_iou_distance=0.7, max_age=30, n_init=3)
+                               max_iou_distance=0.7, max_age=TRACKER_MAX_AGE, n_init=3)
     records = []
     associations = defaultdict(set)
     previous = {}
@@ -154,9 +168,11 @@ def calibrate(args):
             if (frame.shape[1], frame.shape[0]) != size:
                 raise ValueError("Video resolution does not match calibration reference")
             result = model.predict(source=frame, classes=[0], device=args.device,
-                                   imgsz=args.imgsz, save=False, verbose=False)[0]
+                                   imgsz=args.imgsz, iou=YOLO_NMS_IOU, save=False, verbose=False)[0]
             if float(model.predictor.args.conf) != config["confidence"]:
                 raise ValueError("Unexpected YOLO default confidence; record/recalibrate this configuration")
+            if float(model.predictor.args.iou) != config["nms_iou"]:
+                raise ValueError("YOLO NMS IoU does not match calibration configuration")
             tracker.predict()
             tracker.update(tracking.make_detections(frame, result, encoder, patch_shape))
             observations = {o["track_id"]: o for o in ground_observations(tracker.tracks, matrix, frame_idx)}

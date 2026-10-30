@@ -171,6 +171,6 @@ def draw_forecasts(frame, forecasts, inverse_homography, ellipse_points=48, thic
         if valid[-1]:
             x, y = _opencv_points(pixels[-1:])[0, 0]
             if 0 <= x < frame.shape[1] and 0 <= y < frame.shape[0]:
-                cv2.putText(frame, f"ID {forecast['track_id']} +12", (int(x) + 4, int(y) - 4),
+                cv2.putText(frame, f"ID {forecast['track_id']}", (int(x) + 4, int(y) - 4),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, FUTURE_COLOR, 1, cv2.LINE_AA)
     return counts
