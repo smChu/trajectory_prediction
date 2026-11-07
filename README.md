@@ -31,11 +31,11 @@ EKF (State Estimation -> 12-Frame Prediction)
 
 The EKF maintains an independent motion state for each confirmed track:
 
-\[
+$$
 \mathbf{x}_k = [p_x,\ p_y,\ v,\ \theta,\ \omega]^T
-\]
+$$
 
-where \(p_x, p_y\) denote ground-plane position, \(v\) is speed, \(\theta\) is heading, and \(\omega\) is angular velocity. The motion model assumes approximately constant speed and turn rate over a short prediction horizon. State propagation uses **one video frame per time step**.
+where $p_x, p_y$ denote ground-plane position, $v$ is speed, $\theta$ is heading, and $\omega$ is angular velocity. The motion model assumes approximately constant speed and turn rate over a short prediction horizon. State propagation uses **one video frame per time step**.
 
 ## Features
 
@@ -96,7 +96,7 @@ trajectory_prediction/
 
 ### 1. Calibrate the observation noise
 
-The EKF uses an observation-noise covariance matrix \(R\) calibrated offline using a separate development clip and its ground-truth annotations.
+The EKF uses an observation-noise covariance matrix $R$ calibrated offline using a separate development clip and its ground-truth annotations.
 
 ```bash
 python src/estimate_r.py \
