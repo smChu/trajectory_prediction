@@ -1,0 +1,9 @@
+# Python 3.10; versions from the locally verified execution environment.
+numpy==2.2.6
+opencv-python==5.0.0.93
+scipy==1.15.3
+torch==2.14.1
+torchvision==0.29.1
+tensorflow-cpu==2.21.0
+ultralytics==8.4.190
+Pillow==12.3.0

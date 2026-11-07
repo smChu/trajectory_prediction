@@ -1,20 +1,25 @@
 """Calibrate diagonal EKF R from a development VIRAT clip and original GT.
 
-GT is used only by this offline tool, never as an EKF measurement. No DIVA,
+GT is used for offline calibration and comparison overlays, never as an EKF measurement. No DIVA,
 interpolation, tracker-ID equality assumption, or residual-based trimming.
 """
 
 import argparse
+import sys
 from collections import defaultdict
 import hashlib
-import importlib.util
 import json
 from pathlib import Path
+
+# Allow direct script execution as well as python -m from the repository root.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 
 import cv2
 import numpy as np
 
-from homography import ground_observations, load_virat_homography, pixel_to_ground
+from src.homography import ground_observations, load_virat_homography, pixel_to_ground
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -141,9 +146,7 @@ def calibrate(args):
     if output.exists():
         raise FileExistsError(f"Refusing to overwrite existing R calibration: {output}")
     # Reuse the exact existing YOLO/MARS bridge, including its import order.
-    spec = importlib.util.spec_from_file_location("tracking_system", ROOT / "src/tracking system.py")
-    tracking = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(tracking)
+    from src import tracking_core as tracking
     matrix, size, matrix_path = load_virat_homography(args.source)
     config = configuration(args.source, args.model, args.mars_model, args.imgsz)
     capture = cv2.VideoCapture(str(args.source))
@@ -151,6 +154,19 @@ def calibrate(args):
         raise RuntimeError(f"Cannot open {args.source}")
     frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
     gt_frames, gt_info = load_gt(args.source, frame_count)
+    start_frame = args.start_frame
+    stop_frame = min(frame_count, start_frame + args.max_frames) if args.max_frames else frame_count
+    if start_frame < 0 or start_frame >= frame_count or (args.max_frames is not None and args.max_frames < 1):
+        capture.release()
+        raise ValueError("Calibration frame range must be nonempty and inside the video")
+    if start_frame:
+        if not capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame):
+            capture.release()
+            raise RuntimeError("Cannot seek to calibration start frame")
+        if int(round(capture.get(cv2.CAP_PROP_POS_FRAMES))) != start_frame:
+            capture.release()
+            raise RuntimeError("Video seek did not reach the requested calibration frame")
+    print(f"Calibration frames: [{start_frame}, {stop_frame}) of {frame_count}; original clip indices", flush=True)
     encoder, patch_shape = tracking.create_mars_encoder(args.mars_model)
     model = tracking.YOLO(str(args.model))
     tracker = tracking.Tracker(tracking.NearestNeighborDistanceMetric("cosine", 0.2, budget=None),
@@ -159,9 +175,9 @@ def calibrate(args):
     associations = defaultdict(set)
     previous = {}
     matched = 0
-    frame_idx = 0
+    frame_idx = start_frame
     try:
-        while True:
+        while frame_idx < stop_frame:
             ok, frame = capture.read()
             if not ok:
                 break
@@ -199,12 +215,13 @@ def calibrate(args):
                                 "error": (observed - gt_ground).tolist()})
             previous = current  # A gap breaks the consecutive-match requirement.
             frame_idx += 1
-            if frame_idx % 200 == 0:
-                print(f"R calibration: {frame_idx}/{frame_count} frames, {len(records)} candidate samples", flush=True)
+            if (frame_idx - start_frame) % 200 == 0:
+                print(f"R calibration: {frame_idx - start_frame}/{stop_frame - start_frame} frames "
+                      f"(original frame {frame_idx - 1}), {len(records)} candidate samples", flush=True)
     finally:
         capture.release()
-    if frame_idx != frame_count:
-        raise RuntimeError(f"Incomplete decode: {frame_idx}/{frame_count} frames")
+    if frame_idx != stop_frame:
+        raise RuntimeError(f"Incomplete calibration decode: reached {frame_idx}, expected {stop_frame}")
     unstable = {tid for tid, gids in associations.items() if len(gids) > 1}
     accepted = [record for record in records if record["track_id"] not in unstable]
     gt_ids = sorted({r["gt_id"] for r in accepted})
@@ -217,7 +234,9 @@ def calibrate(args):
     result = {
         "schema": 1, "configuration": config,
         "source": str(args.source.resolve()), "source_sha256": sha256(args.source),
-        "frames": frame_idx, "annotation": gt_info, "homography": str(matrix_path),
+        "frames": frame_idx - start_frame, "video_frame_count": frame_count,
+        "frame_range": {"start_inclusive": start_frame, "stop_exclusive": stop_frame},
+        "annotation": gt_info, "homography": str(matrix_path),
         "units": "scene units squared; physical m/ft unspecified; dt=1 frame",
         "matching": {"same_frame_zero_based": True, "mutual_best_iou_minimum": 0.5,
                      "runner_up_margin": 0.1, "consecutive_frames": 3,
@@ -246,6 +265,10 @@ def parse_args():
     parser.add_argument("--device", default="0")
     parser.add_argument("--imgsz", type=int, default=960, help="YOLO inference size (default: 960)")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--start-frame", type=int, default=0,
+                        help="First calibration frame in original clip indices (default: 0)")
+    parser.add_argument("--max-frames", type=int,
+                        help="Calibrate on a contiguous interval; record its exact range in JSON")
     return parser.parse_args()
 
 

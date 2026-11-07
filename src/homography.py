@@ -12,13 +12,19 @@ import cv2
 import numpy as np
 
 
-def load_virat_homography(source):
-    """Return pixel-to-ground H, reference (width, height), and matrix path."""
-    # Official Release 2.0: VIRAT_S_XXYYZZ_KK_SSSSSS_TTTTTT; XXYY is the scene.
-    match = re.fullmatch(r"VIRAT_S_(\d{4})\d{2}_\d{2}_\d{6}_\d{6}", Path(source).stem)
+def scene_from_source(source):
+    """Read the documented scene prefix from full recording or clip names."""
+    # Both full recordings (VIRAT_S_XXYYZZ) and released clips
+    # (VIRAT_S_XXYYZZ_KK_SSSSSS_TTTTTT) use XXYY as the scene.
+    match = re.fullmatch(r"VIRAT_S_(\d{4})\d{2}(?:_\d{2}_\d{6}_\d{6})?", Path(source).stem)
     if match is None:
         raise ValueError(f"Cannot identify a VIRAT scene from filename: {source}")
-    scene = match.group(1)
+    return match.group(1)
+
+
+def load_virat_homography(source):
+    """Return pixel-to-ground H, reference (width, height), and matrix path."""
+    scene = scene_from_source(source)
     directory = Path(__file__).resolve().parents[1] / "Resources/homographies"
     matrix_path = directory / f"VIRAT_{scene}_homography_img2world.txt"
     reference_path = directory / f"VIRAT_S_{scene}.jpg"
@@ -78,6 +84,7 @@ def ground_observations(tracks, matrix, frame_idx):
         observations.append({
             "frame_idx": frame_idx,
             "track_id": int(track.track_id),
+            "bbox_tlwh": [float(value) for value in (x, y, width, height)],
             "bottom_center_pixel": bottom_center,
             "ground_position": position,
         })

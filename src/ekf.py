@@ -201,6 +201,10 @@ class PedestrianEKF:
             })
         return predictions
 
+    def forecast_ready(self):
+        return (self.initialized_at is not None
+                and self.frame_idx - self.initialized_at + 1 >= self.warmup_frames)
+
     def result(self, track_id):
         initialized = self.initialized_at is not None
         elapsed = self.frame_idx - self.initialized_at + 1 if initialized else 0
@@ -220,14 +224,47 @@ class PedestrianEKF:
 
 
 class TrackEKFs:
-    """Own EKFs by DeepSORT ID, expire them with the original track lifecycle."""
+    """Own EKFs by DeepSORT ID, optionally screening initial border boxes.
 
-    def __init__(self, r, q=DEFAULT_Q, p0=None, warmup_frames=9, min_speed=0.01):
+    The image-space check only controls which real observations bootstrap a
+    VIRAT filter. Established filters retain the original update behavior.
+    """
+
+    def __init__(self, r, q=DEFAULT_Q, p0=None, warmup_frames=9, min_speed=0.01,
+                 initialization_image_size=None, initialization_border_margin=1.0,
+                 initialization_max_gap_frames=3):
         self.options = dict(r=r, q=q, p0=p0, warmup_frames=warmup_frames, min_speed=min_speed)
         # Validate settings before opening a video, even if it has no people.
         PedestrianEKF((0, 0), 0, **self.options)
         self.filters = {}
         self.last_frame = -1
+        self.initialization_image_size = None
+        if not np.isfinite(initialization_border_margin) or initialization_border_margin < 0:
+            raise ValueError("Initialization border margin must be finite and nonnegative")
+        self.initialization_border_margin = float(initialization_border_margin)
+        if (not np.isfinite(initialization_max_gap_frames) or initialization_max_gap_frames < 1
+                or int(initialization_max_gap_frames) != initialization_max_gap_frames):
+            raise ValueError("Initialization maximum frame gap must be a positive integer")
+        self.initialization_max_gap_frames = int(initialization_max_gap_frames)
+        if initialization_image_size is not None:
+            size = np.asarray(initialization_image_size, dtype=float)
+            if size.shape != (2,) or not np.isfinite(size).all() or np.any(size <= 2 * initialization_border_margin):
+                raise ValueError("Initialization image dimensions must exceed twice the border margin")
+            self.initialization_image_size = tuple(size)
+        self.initialization_skipped_ids = []
+        self.initialization_reset_ids = []
+
+    def _initialization_eligible(self, observation):
+        if self.initialization_image_size is None:
+            return True
+        box = np.asarray(observation.get("bbox_tlwh"), dtype=float)
+        if box.shape != (4,) or not np.isfinite(box).all() or np.any(box[2:] <= 0):
+            raise ValueError("Border-aware initialization requires a finite positive-size bbox_tlwh")
+        x, y, width, height = box
+        image_width, image_height = self.initialization_image_size
+        margin = self.initialization_border_margin
+        return (x > margin and y > margin and x + width < image_width - margin
+                and y + height < image_height - margin)
 
     def step(self, frame_idx, observations, active_track_ids):
         if frame_idx <= self.last_frame:
@@ -236,10 +273,26 @@ class TrackEKFs:
         active = set(active_track_ids)
         self.filters = {tid: ekf for tid, ekf in self.filters.items() if tid in active}
         measurements = {}
+        seen = set()
+        self.initialization_skipped_ids = []
+        self.initialization_reset_ids = []
         for observation in observations:
             tid = observation["track_id"]
-            if observation["frame_idx"] != frame_idx or tid not in active or tid in measurements:
+            if observation["frame_idx"] != frame_idx or tid not in active or tid in seen:
                 raise ValueError("Observation frame/track mismatch or duplicate")
+            seen.add(tid)
+            ekf = self.filters.get(tid)
+            if (ekf is None or ekf.initialized_at is None) and not self._initialization_eligible(observation):
+                self.initialization_skipped_ids.append(int(tid))
+                continue
+            if (self.initialization_image_size is not None and ekf is not None
+                    and ekf.initialized_at is None
+                    and frame_idx - ekf.last_measurement_frame > self.initialization_max_gap_frames):
+                # A motion estimate should describe a recent local interval,
+                # not nine accepted points scattered across a long entrance
+                # or occlusion. Restart only the pending EKF, never DeepSORT.
+                del self.filters[tid]
+                self.initialization_reset_ids.append(int(tid))
             measurements[tid] = observation["ground_position"]
         for tid, ekf in self.filters.items():
             ekf.predict_to(frame_idx)
